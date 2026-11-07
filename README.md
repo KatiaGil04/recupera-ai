@@ -1,5 +1,10 @@
 # recupera-ai
 
+Si recibes el proyecto por primera vez, empieza por
+[INSTRUCCIONES_PROYECTO.md](INSTRUCCIONES_PROYECTO.md): instalación, reproducción,
+contexto metodológico y pautas para tu asistente de IA. Los asistentes que
+trabajen en el código deben consultar también [AGENTS.md](AGENTS.md).
+
 Para el escenario mensual solicitado, abre `simulacion_cobranzas.ipynb` o ejecuta
 `python simulacion_cobranzas.py`. El flujo conserva una evaluación con datos
 reales y genera por separado un escenario explícitamente sintético.
