@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+outputs/
+data/
+archive/
+*.csv
+*.csv.gz
+*.xlsx
