@@ -2,12 +2,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 from simulacion_cobranzas import (
-    CAT_GRADE, CAT_REF, NUM_GRADE, NUM_REF, ConfigTemporal, cargar_cohortes,
+    CAT_GRADE, CAT_REF, COLUMNAS_PLAN, COLUMNAS_ROLL, NUM_GRADE, NUM_REF, ConfigTemporal, cargar_cohortes,
     construir_modelo, generar_plan, preparar_fechas, saldo_contractual, simular_meses,
 )
 
@@ -97,6 +98,53 @@ class SimulacionTests(unittest.TestCase):
         invalida.loc[0, "loan_amnt"] = np.nan
         with self.assertRaisesRegex(ValueError, "importe"):
             list(simular_meses(invalida, np.array([.2, .4]), ConfigTemporal()))
+
+    def test_sin_cuentas_validas_exporta_csv_legibles(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            config = ConfigTemporal(salida=Path(carpeta), guardar_panel=True)
+            datos = cartera()
+            datos["loan_amnt"] = np.inf
+            resumen, roll = generar_plan(datos, np.array([.2, .4]), config)
+            self.assertEqual(resumen["cuentas_revision_simulacion"], 2)
+            self.assertEqual(resumen["filas_plan_cuenta_mes"], 0)
+            self.assertTrue(roll.empty)
+            for archivo, columnas in [
+                ("plan_llamadas_priorizado.csv", COLUMNAS_PLAN),
+                ("panel_mensual_simulado.csv", COLUMNAS_PLAN[1:]),
+                ("roll_rates_simulados.csv", COLUMNAS_ROLL),
+            ]:
+                tabla = pd.read_csv(Path(carpeta)/archivo)
+                self.assertTrue(tabla.empty)
+                self.assertEqual(tabla.columns.tolist(), columnas)
+
+    def test_panel_incremental_conserva_filas_orden_y_cabecera(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            config = ConfigTemporal(salida=Path(carpeta), guardar_panel=True, meses_colas=0)
+            probabilidades = np.array([.2, .4])
+            esperado = pd.concat(simular_meses(cartera(), probabilidades, config), ignore_index=True)
+            generar_plan(cartera(), probabilidades, config)
+            path = Path(carpeta)/"panel_mensual_simulado.csv"
+            observado = pd.read_csv(path, dtype={"id": str}, parse_dates=["fecha_corte"])
+            pd.testing.assert_frame_equal(observado, esperado, check_dtype=False, check_exact=False)
+            self.assertEqual(path.read_bytes().count(b"\xef\xbb\xbf"), 1)
+
+    def test_fallo_no_publica_plan_parcial(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            config = ConfigTemporal(salida=Path(carpeta))
+            path = Path(carpeta)/"plan_llamadas_priorizado.csv"
+            contenido_anterior = b"resultado anterior completo\n"
+            path.write_bytes(contenido_anterior)
+            primer_mes = next(simular_meses(cartera(), np.array([.2, .4]), config))
+
+            def interrumpida(*args):
+                yield primer_mes
+                raise RuntimeError("fallo de simulacion")
+
+            with patch("simulacion_cobranzas.simular_meses", side_effect=interrumpida):
+                with self.assertRaisesRegex(RuntimeError, "fallo de simulacion"):
+                    generar_plan(cartera(), np.array([.2, .4]), config)
+            self.assertEqual(path.read_bytes(), contenido_anterior)
+            self.assertFalse(any(Path(carpeta).glob(".plan-*")))
 
 
 if __name__ == "__main__":

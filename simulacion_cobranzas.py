@@ -12,8 +12,10 @@ import argparse
 import json
 import logging
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -34,6 +36,15 @@ NUM_GRADE = [c for c in NUM_REF if c != "pub_rec_bankruptcies"]
 CAT_GRADE = [*CAT_REF, "grade"]
 ESTADOS = ("CORRIENTE", "1-30", "31-60", "61-90", "91-120", "121+", "PAGADO", "CASTIGADO")
 MORA = ESTADOS[1:6]
+COLUMNAS_PLAN = [
+    "orden_llamada_mes", "id", "fecha_corte", "meses_en_libros", "estado_origen", "estado_simulado",
+    "dias_mora_sinteticos", "saldo_origen", "out_prncp", "out_prncp_observado", "probabilidad_perdida",
+    "tipo_dato", "origen_saldo", "valor_monetario_en_riesgo",
+]
+COLUMNAS_ROLL = [
+    "estado_origen", "estado_simulado", "cuentas", "saldo_transicion", "cuentas_origen",
+    "saldo_total_origen", "roll_rate_cuentas", "roll_rate_saldo", "mes_origen", "mes_destino", "tipo_dato",
+]
 DPD_SINTETICO = np.array([0, 15, 45, 75, 105, 150, 0, 180])
 # Escenario didáctico editable; NO estimado con Lending Club.
 MATRIZ_SUPUESTA = np.array([
@@ -248,6 +259,10 @@ def simular_meses(cartera, probabilidades, config, matriz=None):
     ordinal_issue = issue.astype("int64").to_numpy()
     estados = np.zeros(len(cartera), dtype=int)
     principal = cartera["loan_amnt"].to_numpy(float)
+    ids = cartera["id"].to_numpy()
+    saldo_observado = cartera["out_prncp"].to_numpy()
+    probabilidades = np.asarray(probabilidades)
+    nombres_estados = np.array(ESTADOS)
     saldo = principal.copy()
     tasa = cartera["int_rate"].to_numpy(float) / 1200
     cuota = cartera["installment"].to_numpy(float)
@@ -271,12 +286,12 @@ def simular_meses(cartera, probabilidades, config, matriz=None):
         saldo[indices[regular]] = np.minimum(saldo_origen[regular], saldo_teorico[regular])
         saldo[indices[destino == 6]] = 0
         fila = pd.DataFrame({
-            "id": cartera["id"].to_numpy()[indices], "fecha_corte": mes.to_timestamp(how="end").normalize(),
-            "meses_en_libros": mob[indices], "estado_origen": np.array(ESTADOS)[origen],
-            "estado_simulado": np.array(ESTADOS)[destino], "dias_mora_sinteticos": DPD_SINTETICO[destino],
+            "id": ids[indices], "fecha_corte": mes.to_timestamp(how="end").normalize(),
+            "meses_en_libros": mob[indices], "estado_origen": nombres_estados[origen],
+            "estado_simulado": nombres_estados[destino], "dias_mora_sinteticos": DPD_SINTETICO[destino],
             "saldo_origen": saldo_origen, "out_prncp": saldo[indices],
-            "out_prncp_observado": cartera["out_prncp"].to_numpy()[indices],
-            "probabilidad_perdida": np.asarray(probabilidades)[indices],
+            "out_prncp_observado": saldo_observado[indices],
+            "probabilidad_perdida": probabilidades[indices],
             "tipo_dato": "SIMULADO", "origen_saldo": "AMORTIZACION_SUPUESTA",
         })
         fila["valor_monetario_en_riesgo"] = fila["probabilidad_perdida"] * fila["out_prncp"]
@@ -284,54 +299,72 @@ def simular_meses(cartera, probabilidades, config, matriz=None):
 
 
 def generar_plan(test, probabilidades, config):
-    """Exporta planes por mes y tasas sintéticas; devuelve conteos y agregados."""
+    """Escribe cada mes sin acumular el plan completo; publica al terminar.
+
+    Solo retiene el mes, los IDs gestionados y agregados pequeños de roll rate.
+    El CSV del plan/panel se reemplaza tras cerrar sus archivos temporales,
+    evitando publicar una lista parcial si falla la simulación.
+    """
     salida = Path(config.salida)
     salida.mkdir(parents=True, exist_ok=True)
     valido = (
         test["loan_amnt"].gt(0) & test["installment"].gt(0) & test["int_rate"].ge(0)
-        & test[["loan_amnt", "installment", "int_rate"]].notna().all(axis=1)
+        & np.isfinite(test[["loan_amnt", "installment", "int_rate"]].to_numpy(float)).all(axis=1)
     )
     test.loc[~valido].to_csv(salida / "cuentas_revision_simulacion.csv", index=False, encoding="utf-8-sig")
     cartera = test.loc[valido].reset_index(drop=True)
-    scores = np.asarray(probabilidades)[valido]
-    planes, tasas = [], []
-    path_panel = salida / "panel_mensual_simulado.csv"
-    primer_panel = True
-    for mes in simular_meses(cartera, scores, config):
+    probabilidades = np.asarray(probabilidades, dtype=float)
+    if probabilidades.shape != (len(test),) or not np.isfinite(probabilidades).all() or ((probabilidades < 0) | (probabilidades > 1)).any():
+        raise ValueError("Cada cuenta necesita una probabilidad finita entre cero y uno.")
+    scores = probabilidades[valido]
+    tasas = []
+    filas_plan = meses_plan = 0
+    ids_plan = set()
+    nombre_plan = "plan_llamadas_priorizado.csv"
+    nombre_panel = "panel_mensual_simulado.csv"
+    with TemporaryDirectory(prefix=".plan-", dir=salida) as temporal:
+        temporal = Path(temporal)
+        with ExitStack() as archivos:
+            escritor_plan = archivos.enter_context((temporal / nombre_plan).open("w", encoding="utf-8-sig", newline=""))
+            pd.DataFrame(columns=COLUMNAS_PLAN).to_csv(escritor_plan, index=False)
+            escritor_panel = None
+            if config.guardar_panel:
+                escritor_panel = archivos.enter_context((temporal / nombre_panel).open("w", encoding="utf-8-sig", newline=""))
+                pd.DataFrame(columns=COLUMNAS_PLAN[1:]).to_csv(escritor_panel, index=False)
+            for mes in simular_meses(cartera, scores, config):
+                if escritor_panel is not None:
+                    mes.to_csv(escritor_panel, header=False, index=False)
+                plan = mes.loc[mes["estado_simulado"].isin(MORA) & mes["out_prncp"].gt(0)].copy()
+                plan = plan.sort_values(["valor_monetario_en_riesgo", "id"], ascending=[False, True])
+                plan.insert(0, "orden_llamada_mes", np.arange(1, len(plan) + 1))
+                if not plan.empty:
+                    plan.to_csv(escritor_plan, header=False, index=False)
+                    filas_plan += len(plan)
+                    meses_plan += 1
+                    ids_plan.update(plan["id"])
+                agregado = mes.groupby(["estado_origen", "estado_simulado"], observed=True).agg(
+                    cuentas=("id", "size"), saldo_transicion=("saldo_origen", "sum"),
+                ).reset_index()
+                rejilla = pd.MultiIndex.from_product([mes["estado_origen"].unique(), ESTADOS], names=["estado_origen", "estado_simulado"]).to_frame(index=False)
+                agregado = rejilla.merge(agregado, how="left").fillna({"cuentas": 0, "saldo_transicion": 0})
+                grupos = agregado.groupby("estado_origen", observed=True)
+                agregado["cuentas_origen"] = grupos["cuentas"].transform("sum")
+                agregado["saldo_total_origen"] = grupos["saldo_transicion"].transform("sum")
+                agregado["roll_rate_cuentas"] = agregado["cuentas"] / agregado["cuentas_origen"]
+                agregado["roll_rate_saldo"] = agregado["saldo_transicion"] / agregado["saldo_total_origen"].replace(0, np.nan)
+                agregado["mes_origen"] = str(mes["fecha_corte"].iloc[0].to_period("M") - 1)
+                agregado["mes_destino"] = str(mes["fecha_corte"].iloc[0].to_period("M"))
+                agregado["tipo_dato"] = "SIMULADO"
+                tasas.append(agregado)
+        (temporal / nombre_plan).replace(salida / nombre_plan)
         if config.guardar_panel:
-            mes.to_csv(path_panel, mode="w" if primer_panel else "a", header=primer_panel, index=False,
-                       encoding="utf-8-sig" if primer_panel else "utf-8")
-            primer_panel = False
-        plan = mes.loc[mes["estado_simulado"].isin(MORA) & mes["out_prncp"].gt(0)].copy()
-        plan = plan.sort_values(["valor_monetario_en_riesgo", "id"], ascending=[False, True])
-        plan.insert(0, "orden_llamada_mes", np.arange(1, len(plan) + 1))
-        planes.append(plan)
-        agregado = mes.groupby(["estado_origen", "estado_simulado"], observed=True).agg(
-            cuentas=("id", "size"), saldo_transicion=("saldo_origen", "sum"),
-        ).reset_index()
-        rejilla = pd.MultiIndex.from_product([mes["estado_origen"].unique(), ESTADOS], names=["estado_origen", "estado_simulado"]).to_frame(index=False)
-        agregado = rejilla.merge(agregado, how="left").fillna({"cuentas": 0, "saldo_transicion": 0})
-        grupos = agregado.groupby("estado_origen", observed=True)
-        agregado["cuentas_origen"] = grupos["cuentas"].transform("sum")
-        agregado["saldo_total_origen"] = grupos["saldo_transicion"].transform("sum")
-        agregado["roll_rate_cuentas"] = agregado["cuentas"] / agregado["cuentas_origen"]
-        agregado["roll_rate_saldo"] = agregado["saldo_transicion"] / agregado["saldo_total_origen"].replace(0, np.nan)
-        agregado["mes_origen"] = str(mes["fecha_corte"].iloc[0].to_period("M") - 1)
-        agregado["mes_destino"] = str(mes["fecha_corte"].iloc[0].to_period("M"))
-        agregado["tipo_dato"] = "SIMULADO"
-        tasas.append(agregado)
-    # Conserva cabeceras aun si el escenario no produce cuentas gestionables.
-    columnas_plan = ["orden_llamada_mes", "id", "fecha_corte", "meses_en_libros", "estado_origen", "estado_simulado",
-                     "dias_mora_sinteticos", "saldo_origen", "out_prncp", "out_prncp_observado", "probabilidad_perdida",
-                     "tipo_dato", "origen_saldo", "valor_monetario_en_riesgo"]
-    plan = pd.concat(planes, ignore_index=True) if planes else pd.DataFrame(columns=columnas_plan)
-    roll = pd.concat(tasas, ignore_index=True) if tasas else pd.DataFrame()
-    plan.to_csv(salida / "plan_llamadas_priorizado.csv", index=False, encoding="utf-8-sig")
+            (temporal / nombre_panel).replace(salida / nombre_panel)
+    roll = pd.concat(tasas, ignore_index=True) if tasas else pd.DataFrame(columns=COLUMNAS_ROLL)
     roll.to_csv(salida / "roll_rates_simulados.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(MATRIZ_SUPUESTA, index=ESTADOS, columns=ESTADOS).to_csv(salida / "matriz_transicion_supuesta.csv")
     resumen = {"cuentas_simuladas": len(cartera), "cuentas_revision_simulacion": int((~valido).sum()),
-               "filas_plan_cuenta_mes": len(plan), "cuentas_distintas_plan": int(plan["id"].nunique()),
-               "meses_plan": int(plan["fecha_corte"].nunique())}
+               "filas_plan_cuenta_mes": filas_plan, "cuentas_distintas_plan": len(ids_plan),
+               "meses_plan": meses_plan}
     return resumen, roll
 
 

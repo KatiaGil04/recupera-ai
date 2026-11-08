@@ -48,6 +48,7 @@ recupera-ai/
 ├── INSTRUCCIONES_PROYECTO.md
 ├── README.md
 ├── requirements.txt
+├── requirements-excel.txt
 ├── simulacion_cobranzas.py
 ├── simulacion_cobranzas.ipynb
 ├── evaluar_objetivo.py
@@ -103,6 +104,15 @@ py -3.13 -m venv .venv
 # Para ejecutar notebooks con ese entorno.
 .\.venv\Scripts\python.exe -m pip install ipykernel
 ```
+
+Solo para usar `--excel` en el prototipo inicial:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-excel.txt
+```
+
+`openpyxl` es opcional; no se instala con los requisitos básicos del flujo
+temporal. La lectura del diccionario local usa XML y no necesita ese paquete.
 
 Si `py` no existe pero `python` apunta al intérprete deseado, el comando de
 creación es `python -m venv .venv`. Si ninguno está en PATH, usar la ruta completa
@@ -175,7 +185,7 @@ Se puede comprobar primero la instalación sin leer los millones de préstamos:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-La última ejecución de comprobación reportó 19 pruebas correctas. Los tests
+La última ejecución de comprobación reportó 22 pruebas correctas. Los tests
 utilizan archivos pequeños sintéticos: no requieren copiar todos los CSV.
 
 ### Parámetros desde Python o Jupyter
@@ -204,9 +214,9 @@ Con poca memoria se pueden reducir `chunksize` y `max_train`. Menos árboles
 reduce tiempo. Esas variantes deben documentarse como nuevas ejecuciones: no
 garantizan los mismos AUC. `guardar_panel=True` puede generar una salida grande;
 por defecto se conservan el plan de mora y los agregados de transición.
-En la implementación actual también se conserva en memoria la cohorte de 2014
-y se acumulan las filas del plan; la lectura por bloques no impone un límite
-estricto de RAM.
+El plan se escribe por mes sin acumular todas sus filas. Se conservan en memoria
+la cohorte de 2014, el mes en curso, los IDs únicos gestionados y agregados de
+transición; la lectura por bloques no impone un límite estricto de RAM.
 
 ## 5. Qué aporta cada fuente
 
@@ -419,6 +429,10 @@ En `outputs/simulacion/`, o en la carpeta indicada con `--salida`:
 principal. Las auditorías adicionales escriben en `outputs/auditoria/`.
 Los CSV principales usan UTF-8 con BOM. Reejecutar en la misma carpeta sobrescribe
 salidas del mismo nombre; conservar carpetas separadas para comparar experimentos.
+La escritura mensual usa archivos temporales para plan y panel: si falla el
+bucle de simulación, no publica el plan parcial ni sustituye el anterior.
+Esto no garantiza una transacción conjunta de todas las salidas del pipeline.
+Sin cuentas válidas se exportan tablas vacías con cabeceras legibles.
 
 Valores de la ejecución de referencia:
 
@@ -505,7 +519,6 @@ trabajar dentro del alcance que solicite la responsable del proyecto.
   conjunto de validación; no optimizar solo para superar el AUC del test usado.
 - Incorporar escenarios alternativos y sensibilidad de matriz/saldos, mostrando
   la incertidumbre de los supuestos y diferencias de capacidad mensual.
-- Exportar el plan por mes sin acumular todos sus registros en RAM.
 - Añadir capacidad del call center, contactabilidad, costo y restricciones de
   gestión cuando existan esos datos. Con los CSV actuales serían supuestos.
 - Sustituir la simulación por un panel observado si se consigue, conservando
@@ -513,6 +526,11 @@ trabajar dentro del alcance que solicite la responsable del proyecto.
 
 Esta lista es una propuesta de siguientes pasos, no una afirmación de que esas
 capacidades ya existan ni una orden de implementarlas todas de inmediato.
+
+Ya se implementaron la exportación incremental del plan/panel, la conservación
+del plan anterior ante fallos durante la simulación, la revisión de importes no
+finitos y la separación de dependencias opcionales de Excel. Esos cambios son
+de ejecución y robustez; no añaden capacidad predictiva ni validan recobro real.
 
 ## 13. Datos que faltan para validar un sistema de cobranza real
 

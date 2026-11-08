@@ -9,8 +9,20 @@ Para el escenario mensual solicitado, abre `simulacion_cobranzas.ipynb` o ejecut
 `python simulacion_cobranzas.py`. El flujo conserva una evaluación con datos
 reales y genera por separado un escenario explícitamente sintético.
 
-Priorización experimental de cobranza con Lending Club: lectura por bloques,
-Random Forest calibrado y orden por `prob_recobro * out_prncp`.
+## Objetivo del proyecto
+
+Desarrollar y evaluar un prototipo de apoyo a cobranzas que combine predicción
+de castigo histórico con escenarios mensuales de mora y capital pendiente,
+para ordenar las cuentas por riesgo monetario y analizar sus transiciones.
+
+El componente predictivo usa resultados reales de Lending Club; los roll rates
+y la gestión mensual del escenario son sintéticos. Reducir mora o mejorar el
+recobro mediante llamadas es el objetivo de negocio, todavía pendiente de
+validar con historiales de pagos, mora y gestión reales.
+
+El módulo `priorizacion_recobro.py` conserva el prototipo inicial, con otro
+target y un Random Forest calibrado. El flujo temporal actual usa scores sin
+calibrar; no se deben mezclar las probabilidades ni los resultados de ambos.
 
 ## Ejecutar
 
@@ -18,13 +30,13 @@ Requiere Python 3.10 o posterior:
 
 ```powershell
 python -m pip install -r requirements.txt
-python priorizacion_recobro.py
+python simulacion_cobranzas.py
 ```
 
 Si `python` no está en el PATH, en este equipo se verificó con:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe" priorizacion_recobro.py --id-col id --jobs 2
+& "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe" simulacion_cobranzas.py --jobs 2
 ```
 
 Busca `accepted_2007_to_2018Q4.csv` o `.csv.gz` en la carpeta actual, `data/`,
@@ -38,9 +50,11 @@ data/archive/rejected_2007_to_2018q4.csv/rejected_2007_to_2018Q4.csv
 
 Prefiere el CSV descomprimido frente al gzip de la misma carpeta base.
 
-Para conservar el identificador de préstamo y generar también Excel:
+Para ejecutar el prototipo inicial opcional, conservar el identificador de
+préstamo y generar también Excel, instala el complemento de exportación:
 
 ```powershell
+python -m pip install -r requirements-excel.txt
 python priorizacion_recobro.py --csv "data\archive\accepted_2007_to_2018q4.csv\accepted_2007_to_2018Q4.csv" --id-col id --excel
 ```
 
@@ -378,6 +392,24 @@ saldo omite LGD y no debe presentarse como pérdida esperada validada.
 escenario, incluidos cierres en su mes de ocurrencia. Puede ocupar mucho disco.
 La lectura, simulación y exportación del panel se realizan por bloques/meses.
 Reejecutar sobrescribe las salidas del mismo nombre; no modifica fuentes.
+
+El plan de llamadas también se escribe por mes, sin acumular todo el historial
+del plan en memoria. Plan y panel se construyen en archivos temporales y se
+publican después de completar la simulación; un fallo durante el bucle conserva
+el plan anterior. Esto no hace transaccional al conjunto de todas las salidas.
+Se retienen la cohorte, el mes en curso, los IDs únicos gestionados y agregados
+de transición, por lo que sigue sin existir un límite rígido de RAM.
+
+`requirements.txt` instala el procesamiento y las gráficas. `openpyxl` quedó en
+`requirements-excel.txt`, opcional para el Excel del prototipo inicial. El flujo
+temporal y la revisión del diccionario local no requieren ese complemento.
+
+La comparación local de la versión anterior y la optimizada, usando las mismas
+162 570 cuentas y scores ya calculados, produjo CSV de plan y roll rates
+idénticos byte a byte. El pico de asignaciones rastreadas con `tracemalloc`
+durante `generar_plan` bajó de 148,38 a 127,18 MiB (14,3 %). Esa medición no
+representa la RAM total del proceso ni el costo del entrenamiento. La evidencia
+local está en `outputs/optimizacion/comparacion.json`. Pasaron 22 pruebas.
 
 ### Resultado de la ejecución mensual verificada
 

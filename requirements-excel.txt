@@ -1,0 +1,3 @@
+# Opcional: exportación Excel del prototipo priorizacion_recobro.py.
+-r requirements.txt
+openpyxl>=3.1,<4
